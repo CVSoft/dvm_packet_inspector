@@ -12,7 +12,7 @@ import time
 # DVM Packet Inspector, by CVSoft
 # Licensed under GPL v3
 
-VERSION = 0x0100
+VERSION = 0x0101
 
 DEFAULT_CONFIG = {
     "Inspector": {
@@ -327,6 +327,24 @@ class P25Dissector(object):
         # TDULC: F
         duid = data[18] & 0xF
         duid_name = ("" if duid not in DUIDS else DUIDS[duid])
+        if duid == 5 and data[176] == 1 and len(data) > 177:
+            # The first LDU1 has encryption info attached, as HDUs aren't sent
+            # over the network. This allows DVMHost to rebuild the HDU entirely
+            # as the LDU1's LC contains all the rest of the information
+            # contained in the HDU.
+            # See 8.2.1 for HDU structure and 5.2 for Header Word structure
+            # See TIA-102.AABF-A 7.3.1 for the LCO for group calls in the LDU1
+            # and 7.3.3 for the LCO for unit-to-unit calls.
+            #
+            # This encryption information is derived from the HDU that wasn't
+            # sent.
+            # Byte 176 will equal $01 if encryption information is embedded
+            # in the LDU1.
+            # Byte 177 contains the algorithm ID.
+            # Bytes 178-179 contain the key ID.
+            # Bytes 180-188 contain the message indicator.
+            print("DVM-provided HDU Encryption Information:")
+            self._decode_esw(data[177], data[178:180], data[180:189], indent=1)
         print("DUID: ${:02X}".format(duid),
               "" if not duid_name else '('+duid_name+')')
         if hasattr(self, "decode_"+duid_name):
@@ -335,7 +353,7 @@ class P25Dissector(object):
         print()
 
     def decode_HDU(self, data):
-        # TIA-102.BAAA-A page 10 (22 in PDF)
+        # TIA-102.BAAA-A page 10 (22 in PDF); also 8.2.1 (page 36 / 48 in PDF)
         # 72 bits Message Indicator
         # 8 bits Manufacturer ID - need table
         # 8 bits Algorithm ID - need table
@@ -357,14 +375,19 @@ class P25Dissector(object):
                data[104] == 0x71 and data[121] == 0x72 and data[138] == 0x73, \
                "Invalid LDU2 frame structure!"
         print("Encryption Sync Word information:")
-        print("- Algorithm: ${:02X}".format(data[88])+\
-              ("" if data[88] not in ALGOS else " ("+ALGOS[data[88]]+")"))
-        print("- Key ID   : ${:04X}"\
-              .format(struct.unpack(">H", data[89:91])[0]))
-        esw = data[37:40]+data[54:57]+data[71:74]
-        print("- Message Indicator:", quick_hex(esw))
+        self._decode_esw(data[88], data[89:91],
+                        data[37:40]+data[54:57]+data[71:74])
 
-    def decode_vocoder(self, data):
+    def _decode_esw(self, algid, keyid, mi, indent=0):
+        """Pretty print encryption sync word info"""
+        if isinstance(algid, bytearray): algid = algid[0]
+        print(' '*indent+"- Algorithm: ${:02X}".format(algid)+\
+              ("" if algid not in ALGOS else " ("+ALGOS[algid]+")"))
+        print(' '*indent+"- Key ID   : ${:04X}"\
+              .format(struct.unpack(">H", keyid)[0]))
+        print(' '*indent+"- Message Indicator:", quick_hex(mi))
+
+    def _decode_vocoder(self, data):
         # u_0 u_1 ... u_7 12*4+11*3+7 = 88 bits
         # DVM should de-interleave this for us
         # TIA-102.BAAA-A page 7 (19 in PDF)

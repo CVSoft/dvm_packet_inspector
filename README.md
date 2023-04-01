@@ -11,9 +11,9 @@ Create a config file, in INI structure, containing your desired options. See the
 
 Then run DVM Packet Inspector on the command line with this config file's filename as the only positional argument, e.g. `python dvm_packet_inspector.py config.ini`. 
 
-DVM Packet Inspector will attempt to log into the server, and once logged in, will wait for P25 traffic. When P25 traffic is received, a lot of information will get dumped to the console. This is primarily general information about what data unit was just received, plus a complete breakdown of the Link Control Word (transmitted during LDU1) and Encryption Sync Word (transmitted during LDU2). 
+*Currently, DVM Packet Inspector does not connect to DVMFNE due to a bug in the challenge handshake.* It'll get fixed eventually. 
 
-*I have not tested this on an actual DVM FNE; only on simpleFNE*. I make an effort to include the challenge handshake for login, and it should work in theory, but it has not been tested.
+DVM Packet Inspector will attempt to log into the server, and once logged in, will wait for P25 traffic. When P25 traffic is received, a lot of information will get dumped to the console. This is primarily general information about what data unit was just received, plus a complete breakdown of the Link Control Word (transmitted during LDU1) and Encryption Sync Word (transmitted during LDU2). Additionally, DVM Packet Inspector checks whether the Message Indicator (used for synchronizing the state of the encryption algorithm between sending and receiving radios) is incrementing in the expected sequence (following the linear feedback shift register specified in the P25 standard, which is not a requirement), whether it has been duplicated from the previous LDU2 data unit, and whether it remains in sync with the Message Indicator sent in the HDU. 
 
 Exit DVM Packet Inspector with Ctrl-C. 
 

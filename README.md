@@ -19,7 +19,7 @@ Exit DVM Packet Inspector with Ctrl-C.
 There are many configurable options in DVM Packet Inspector; all of these are in an INI-format file under a section titled Inspector. You can use the same config file you use for SimpleFNE, as the options live in different sections. The configurable options are:
 * `ip`: the IPv4 address of the FNE to connect to. 
 * `port`: the port number of the FNE to connect to. 
-* `peer_id`: the DVMHost peer ID to use -- this is any integer from 0 to 4294967295. Note that DVM Packet Inspector enforces peer ID match in incomng packets. If you have problems with peer ID mismatch, set this to 0 and notify the developer of the FNE you are using. 
+* `peer_id`: the DVMHost peer ID to use -- this is any integer from 0 to 4294967295. Note that DVM Packet Inspector enforces peer ID match in incomng packets. If you have problems with peer ID mismatch, set this to 0 and notify the developer of the FNE you are using. *Note that when connecting to DVMFNE, this value cannot be 0 and must be set in a config file*.
 * `use_connect`: this tells the socket used to connect to the FNE to call connect() after creation. This is very much a debugging option and shouldn't make any difference whether it's set or unset. 
 * `tickrate`: as the main thread runs asynchronously, this controls how frequently it checks for events, in Hz. This value should be left unconfigured in configuration files. 
 * `ping_interval`: how often DVM Packet Inspector sends ping commands to the FNE. If this is too long, the connection to the FNE will time out due to inactivity. On DVMFNE, this appears to be after 18 seconds, while on simpleFNE this timeout is about 119 seconds and configurable. 

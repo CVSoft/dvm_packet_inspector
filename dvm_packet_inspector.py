@@ -12,7 +12,7 @@ import time
 # DVM Packet Inspector, by CVSoft
 # Licensed under GPL v3
 
-VERSION = 0x0101
+VERSION = 0x0102
 
 DEFAULT_CONFIG = {
     "Inspector": {
@@ -200,6 +200,7 @@ class PacketInspector(object):
         self.tick_time = 1./self.cp.getfloat("Inspector", "tickrate",
                                              fallback=20.0)
         self.cm = ConnectionHandler(self)
+        self.p = P25Dissector()
         self.running = True
         try: self.loop()
         except KeyboardInterrupt:
@@ -265,8 +266,9 @@ class PacketInspector(object):
 
     def cmd_P25D(self, data):
         """P25 data packet"""
-        p = P25Dissector(data)
-        del p
+        self.p.load(data)
+        self.p.show()
+##        self.p.verify_mi()
 
 
 # P25 Dissector stuff
@@ -305,18 +307,132 @@ except ImportError:
     }
 
 
+def next_mi(data):
+    """Given a 9-bit MI, guess what the next MI will be"""
+    # you can do 65-bit math, right?
+    if isinstance(data, (bytes, bytearray)):
+        last_byte = data[8:9]
+        data = struct.unpack(">Q", data[:8])[0]
+    for x in range(64):
+        res = data & 0xA000202004004000
+        data = (data << 1) & 0x0FFFFFFFFFFFFFFFF
+        res = count_set_bits(res)
+        data += (res & 0x01)
+    return struct.pack(">Q", data)+last_byte
+
+def count_set_bits(n):
+    """Count how many bits are set in an integer, used by next_mi"""
+    # i stole this code, it's not mine
+    count = 0
+    while n:
+        n &= n - 1
+        count += 1
+    return count
+
+
 class P25Dissector(object):
     """P25 protocol dissector"""
-    def __init__(self, data):
+    def __init__(self, data=None, show=True):
         self.d = data
-        print("Received {:d} bytes from DVM".format(len(data)))
-        print(quick_hex(data))
-        print("DVM-provided LCF:", data[0])
+        self.last_mi = None
+        self.thunk = False
+        if not data: return
+        self.think()
+        if show:
+            self.show()
+
+    def load(self, data):
+        """Load, then think about, a network-received data unit"""
+        self.d = data
+        self.think()
+
+    def think(self):
+        """Set a bunch of parameters for this class with no console output"""
+        # Every class storage attribute is set by this method;
+        #  no need to reinitialize the object!
+        # DVM routing info
+        if not self.d: return # need data in order to think
+        self.dvm_src = struct.unpack(">I", b'\x00'+self.d[1:4])[0]
+        self.dvm_tgt = struct.unpack(">I", b'\x00'+self.d[4:7])[0]
+        self.dvm_peer = struct.unpack(">I", self.d[7:11])[0]
+        self.duid = self.d[18] & 0xF
+        self.duid_name = ("" if self.duid not in DUIDS else DUIDS[self.duid])
+        # MI is initialized inside DUIDs so we can choose to keep a copy
+        # self.mi should only be wiped at start/end of tx, or when we get
+        #  a new MI in the LDU2 ESW
+        self.algid = None
+        self.keyid = None
+        self.has_mi = False
+        if not hasattr(self, "mi"): self.mi = None #don't overwrite existing MI
+        if not hasattr(self, "first_mi"):
+            self.first_mi = None #don't overwrite existing first MI
+        if self.duid == 5 and self.d[176] == 1 and len(self.d) > 177:
+            self.dvm_mi = self.d[180:189]
+            self.dvm_algid = self.d[177]
+            self.dvm_keyid = self.d[178:180]
+            # it is reasonably safe to copy these
+            self.has_mi = True
+            self.mi = self.dvm_mi
+            self.first_mi = self.dvm_mi
+            self.algid = self.dvm_algid
+            self.keyid = self.keyid
+        else:
+            self.dvm_mi = None
+            self.dvm_algo = None
+            self.dvm_keyid = None
+        # initialize stuff used by various data units
+        self.lc = None # use a helper method to parse this; don't do it here
+        # note that we aren't stripping off 20 bytes of DVM header here
+        if self.duid == 5: # LDU1
+            self.lc = self.d[57:60]+self.d[74:77]+self.d[91:94]
+        elif self.duid == 10: # LDU2
+            self.last_mi = self.mi
+            self.mi = self.d[57:60]+self.d[74:77]+self.d[91:94]
+            self.has_mi = True
+            self.algid = self.d[108]
+            self.keyid = self.d[109:111]
+            self.first_mi = next_mi(self.first_mi)
+        elif self.duid == 3 or self.duid == 15: # TDU/TDULC, MI is now invalid
+            self.mi = None
+        elif self.duid == 0: # HDU, last MI is now invalid
+            self.last_mi = None
+            self.mi = None
+        elif self.duid in DUIDS: pass # ignore known, unparsed DUIDs, like PDU
+        else:
+            print("Unknown DUID =", self.duid)
+        self.thunk = True
+
+    def verify_mi(self):
+        """Verify whether the MI we received should decode properly"""
+        if self.has_mi and self.thunk and \
+           self.last_mi != None and self.mi != None:
+            if self.mi != self.first_mi:
+                print("MI is out of sync from HDU!")
+            if self.last_mi == self.mi:
+                print("MI duplicated from the last frame!")
+            elif next_mi(self.last_mi) != self.mi:
+                print("Current MI doesn't match last MI's expected sequence!")
+                print("Expected:", quick_hex(next_mi(self.last_mi)))
+                print("Received:", quick_hex(self.mi))
+                if isinstance(self.algid, int) and \
+                   isinstance(self.keyid, (bytes, bytearray)):
+                    print("AlgID=${:02X} | KeyID=${:04X}"\
+                          .format(self.algid, self.keyid[0]*256+self.keyid[1]))
+            else:
+                print("MI looks healthy!")
+
+    def show(self):
+        """Print very verbose information about the received data unit"""
+        # TODO: use think output
+        print("Received {:d} bytes from DVM".format(len(self.d)))
+        print(quick_hex(self.d))
+        print("DVM-provided LCF:", self.d[0])
         print("DVM-provided Source ID:",
-              struct.unpack(">I", b'\x00'+data[1:4])[0])
+              struct.unpack(">I", b'\x00'+self.d[1:4])[0])
         print("DVM-provided Target ID:",
-              struct.unpack(">I", b'\x00'+data[4:7])[0])
-        print("DVM-provided Source Peer:", struct.unpack(">I", data[7:11])[0])
+              struct.unpack(">I", b'\x00'+self.d[4:7])[0])
+        print("DVM-provided Source Peer:",
+              struct.unpack(">I", self.d[7:11])[0])
         # see TIA-102.BAAA-A for differentiating frames
         # DUIDs (assume P=0):
         # HDU: 0
@@ -325,9 +441,9 @@ class P25Dissector(object):
         # LDU2: A (P=1)
         # PDU: B
         # TDULC: F
-        duid = data[18] & 0xF
+        duid = self.d[18] & 0xF
         duid_name = ("" if duid not in DUIDS else DUIDS[duid])
-        if duid == 5 and data[176] == 1 and len(data) > 177:
+        if duid == 5 and self.d[176] == 1 and len(self.d) > 177:
             # The first LDU1 has encryption info attached, as HDUs aren't sent
             # over the network. This allows DVMHost to rebuild the HDU entirely
             # as the LDU1's LC contains all the rest of the information
@@ -344,21 +460,23 @@ class P25Dissector(object):
             # Bytes 178-179 contain the key ID.
             # Bytes 180-188 contain the message indicator.
             print("DVM-provided HDU Encryption Information:")
-            self._decode_esw(data[177], data[178:180], data[180:189], indent=1)
+            self._decode_esw(self.d[177], self.d[178:180], self.d[180:189],
+                             indent=1)
         print("DUID: ${:02X}".format(duid),
               "" if not duid_name else '('+duid_name+')')
         if hasattr(self, "decode_"+duid_name):
-            try: getattr(self, "decode_"+duid_name)(data[20:])
+            try: getattr(self, "decode_"+duid_name)(self.d[20:])
             except AssertionError as e: print(e.args[0])
         print()
 
     def decode_HDU(self, data):
         # TIA-102.BAAA-A page 10 (22 in PDF); also 8.2.1 (page 36 / 48 in PDF)
         # 72 bits Message Indicator
-        # 8 bits Manufacturer ID - need table
-        # 8 bits Algorithm ID - need table
+        # 8 bits Manufacturer ID
+        # 8 bits Algorithm ID
         # 16 bits Key ID
-        # 16 bits Talkgroup ID - alias 1 and $FFFF, warn on 0
+        # 16 bits Talkgroup ID
+        # HDU is not sent over FNE -- it is embedded in LDU1
         pass
 
     def decode_LDU1(self, data):
@@ -377,10 +495,11 @@ class P25Dissector(object):
         print("Encryption Sync Word information:")
         self._decode_esw(data[88], data[89:91],
                         data[37:40]+data[54:57]+data[71:74])
+        self.verify_mi()
 
     def _decode_esw(self, algid, keyid, mi, indent=0):
         """Pretty print encryption sync word info"""
-        if isinstance(algid, bytearray): algid = algid[0]
+        if isinstance(algid, (bytes, bytearray)): algid = algid[0]
         print(' '*indent+"- Algorithm: ${:02X}".format(algid)+\
               ("" if algid not in ALGOS else " ("+ALGOS[algid]+")"))
         print(' '*indent+"- Key ID   : ${:04X}"\

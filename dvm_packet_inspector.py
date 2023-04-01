@@ -12,7 +12,7 @@ import time
 # DVM Packet Inspector, by CVSoft
 # Licensed under GPL v3
 
-VERSION = 0x0102
+VERSION = 0x0103
 
 DEFAULT_CONFIG = {
     "Inspector": {
@@ -21,7 +21,9 @@ DEFAULT_CONFIG = {
         "peer_id": "0",
         "password":"s3cr37w0rd",
         "use_connect":"true",
-        "tickrate":"20.0"
+        "tickrate":"20.0",
+        "ping_interval":"15.0",
+        "mi_only": "false"
     }
 }
 
@@ -49,8 +51,10 @@ class ConnectionHandler(object):
         self.cb = cb # we need this for login
         self.addr = (self.cb.cp.get("Inspector", "ip", fallback="127.0.0.1"),
                      self.cb.cp.getint("Inspector", "port", fallback=54000))
-        self.peer_id = struct.pack(">I", cb.cp.getint("Host", "peer_id",
+        self.peer_id = struct.pack(">I", cb.cp.getint("Inspector", "peer_id",
                                                       fallback=0))
+        self.ping_interval = self.cb.cp.getfloat("Inspector", "ping_interval",
+                                                 fallback=15.0)
         self.connected = self.cb.cp.get("Inspector", "use_connect",
                                         fallback=True)
         self.s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -185,8 +189,7 @@ class ConnectionHandler(object):
                            struct.unpack(">I", self.peer_id))
             return True
         except AssertionError as e:
-            print("Login failed! Reason:")
-            print(e.args[0])
+            print("Login failed! Reason:", e.args[0])
         except socket.timeout:
             print("Encountered a timeout when communicating with master.")
         return False
@@ -199,6 +202,8 @@ class PacketInspector(object):
         if cfg_fn: self.cp.read(cfg_fn)
         self.tick_time = 1./self.cp.getfloat("Inspector", "tickrate",
                                              fallback=20.0)
+        self.mi_only = self.cp.getboolean("Inspector", "mi_only",
+                                          fallback=False)
         self.cm = ConnectionHandler(self)
         self.p = P25Dissector()
         self.running = True
@@ -242,8 +247,8 @@ class PacketInspector(object):
                     self.cmd_unknown(cmd, data)
                 else:
                     print("got non-command", repr(msg))
-            # ping every 30 seconds
-            if now - last_ping > 30:
+            # ping every so often
+            if now - last_ping > self.cm.ping_interval:
                 last_ping = now
                 self.cm.asend(b"RPTPING"+self.cm.peer_id)
             # sleep until next tick
@@ -264,11 +269,15 @@ class PacketInspector(object):
                .format(struct.unpack(">I", data),
                        struct.unpack(">I", self.cm.peer_id))
 
+    def cmd_MSTTID(self, data):
+        """We just ignore this command"""
+        pass
+
     def cmd_P25D(self, data):
         """P25 data packet"""
         self.p.load(data)
-        self.p.show()
-##        self.p.verify_mi()
+        if self.mi_only: self.p.show()
+        else: self.p.show_mi()
 
 
 # P25 Dissector stuff
@@ -402,24 +411,41 @@ class P25Dissector(object):
             print("Unknown DUID =", self.duid)
         self.thunk = True
 
-    def verify_mi(self):
+    def show_mi(self):
+        """Show less than one line of info if we only care about MIs"""
+        if not self.thunk or self.algid == None or self.keyid == None: return
+        if not (self.duid == 10 or (self.duid == 5 and self.dvm_algid)): return
+        print("Src={:<7d} | Tgt={:<5d} | Peer={:<7d} | Alg=${:02X} | \
+KID=${:04X} | ".format(self.dvm_src, self.dvm_tgt, self.dvm_peer, self.algid,
+                       struct.unpack(">H", self.keyid)[0]), end='')
+        self.verify_mi(brief=True)
+
+    def verify_mi(self, brief=True):
         """Verify whether the MI we received should decode properly"""
         if self.has_mi and self.thunk and \
            self.last_mi != None and self.mi != None:
             if self.mi != self.first_mi:
-                print("MI is out of sync from HDU!")
+                if brief: print("MI-HDU SYNC! | ", end='')
+                else: print("MI is out of sync from HDU!")
             if self.last_mi == self.mi:
-                print("MI duplicated from the last frame!")
+                if brief: print("MI dupe!")
+                else: print("MI duplicated from the last frame!")
             elif next_mi(self.last_mi) != self.mi:
-                print("Current MI doesn't match last MI's expected sequence!")
+                if brief:
+                    print("MI seq loss!")
+                else:
+                    print("Current MI doesn't match last MI's expected \
+sequence!")
                 print("Expected:", quick_hex(next_mi(self.last_mi)))
                 print("Received:", quick_hex(self.mi))
-                if isinstance(self.algid, int) and \
+                if not brief and isinstance(self.algid, int) and \
                    isinstance(self.keyid, (bytes, bytearray)):
                     print("AlgID=${:02X} | KeyID=${:04X}"\
                           .format(self.algid, self.keyid[0]*256+self.keyid[1]))
             else:
-                print("MI looks healthy!")
+                if brief: print("MI OK")
+                else: print("MI looks healthy!")
+        elif brief: print()
 
     def show(self):
         """Print very verbose information about the received data unit"""
@@ -582,3 +608,4 @@ def main():
 
 if __name__ == "__main__" and "idlelib.run" not in sys.modules:
     main()
+
